@@ -10,6 +10,7 @@ var WATCHER, scanCallback;
 
 var initialized = false;
 var cachedServices = [];
+var connectedDevices = [];
 
 var NAME_KEY = "System.ItemNameDisplay";
 var RSSI_KEY = "System.Devices.Aep.SignalStrength";
@@ -241,15 +242,28 @@ module.exports = {
         address: address,
         status: bleDevice.connectionStatus === BluetoothConnectionStatus.connected ? "connected" : "disconnected"
       };
+      
+      // Cache devices so we can disconnect from them properly later
+      connectedDevices.push({ address: address, device: bleDevice });
 
       // Attach listener to device to report disconnected event
-      bleDevice.addEventListener('connectionstatuschanged', function connectionStatusListener(e) {
+      bleDevice.onconnectionstatuschanged = function connectionStatusListener(e) {
         if (e.target.connectionStatus === BluetoothConnectionStatus.disconnected) {
           result.status = "disconnected";
           successCallback(result);
-          bleDevice.removeEventListener('connectionstatuschanged', connectionStatusListener);
+          bleDevice.onconnectionstatuschanged = null;
+          
+          // Remove device from cache
+          for (var i = 0; i < connectedDevices.length;) {
+            var connectedDevice = connectedDevices[i];
+            if (connectedDevice.device.deviceId === bleDevice.deviceId) {
+              connectedDevices.splice(i, 1);
+            } else {
+              i++;
+            }
+          }
         }
-      });
+      };
       // Need to use keepCallback to be able to report "disconnect" event
       // https://github.com/randdusing/cordova-plugin-bluetoothle#connect
       successCallback(result, { keepCallback: true });
@@ -288,6 +302,56 @@ module.exports = {
       });
     }
 
+  },
+  
+  disconnect: function (successCallback, errorCallback, params) {
+    if (!initialized) {
+      errorCallback({ error: "disconnect", message: "Not initialized." });
+      return;
+    }
+
+    var deviceId;
+
+    if (params && params.length > 0 && params[0].address) {
+      deviceId = params[0].address;
+
+      for (var i = 0; i < cachedServices.length;) {
+        var service = cachedServices[i];
+        if (service.deviceId === deviceId) {
+          cachedServices.splice(i, 1);
+          
+          // All characteristics must be unsubscribed from before the device will disconnect
+          var characteristics = service.deviceService.getAllCharacteristics();
+          for (j = 0; j < characteristics.length; j++) {
+            characteristics[j].onvaluechanged = null;
+            characteristics[j].writeClientCharacteristicConfigurationDescriptorAsync(gatt.GattClientCharacteristicConfigurationDescriptorValue.none);
+          }
+          
+          // All service must be closed before the device will disconnect
+          service.deviceService.close();
+        } else {
+          i++;
+        }
+      }
+
+      for (var j = 0; j < connectedDevices.length;) {
+        var connectedDevice = connectedDevices[j];
+        if (connectedDevice.address === deviceId) {
+          connectedDevices.splice(j, 1);
+          // The device must have any event handlers removed and be closed before the device will disconnect
+          connectedDevice.device.onconnectionstatuschanged = null;
+          connectedDevice.device.close();
+
+          connectedDevice.device.deviceInformation.pairing.unpairAsync().done(function (result) {
+            successCallback({ address: deviceId, status: 'disconnected' });
+          }, function (error) {
+            errorCallback({ error: "disconnect", message: JSON.stringify(error) });
+          });
+        } else {
+          j++;
+        }
+      }
+    }
   },
 
   discover: function (successCallback, errorCallback, params) {
