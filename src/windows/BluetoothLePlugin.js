@@ -10,7 +10,7 @@ var WATCHER, scanCallback;
 
 var initialized = false;
 var cachedServices = [];
-var connectedDevices = [];
+var cachedDevices = [];
 
 var NAME_KEY = "System.ItemNameDisplay";
 var RSSI_KEY = "System.Devices.Aep.SignalStrength";
@@ -242,9 +242,6 @@ module.exports = {
         address: address,
         status: bleDevice.connectionStatus === BluetoothConnectionStatus.connected ? "connected" : "disconnected"
       };
-      
-      // Cache devices so we can disconnect from them properly later
-      connectedDevices.push({ address: address, device: bleDevice });
 
       // Attach listener to device to report disconnected event
       bleDevice.onconnectionstatuschanged = function connectionStatusListener(e) {
@@ -254,10 +251,10 @@ module.exports = {
           bleDevice.onconnectionstatuschanged = null;
           
           // Remove device from cache
-          for (var i = 0; i < connectedDevices.length;) {
-            var connectedDevice = connectedDevices[i];
-            if (connectedDevice.device.deviceId === bleDevice.deviceId) {
-              connectedDevices.splice(i, 1);
+          for (var i = 0; i < cachedDevices.length;) {
+            var cachedDevice = cachedDevices[i];
+            if (cachedDevice.device.deviceId === bleDevice.deviceId) {
+              cachedDevices.splice(i, 1);
             } else {
               i++;
             }
@@ -334,15 +331,15 @@ module.exports = {
         }
       }
 
-      for (var j = 0; j < connectedDevices.length;) {
-        var connectedDevice = connectedDevices[j];
-        if (connectedDevice.address === deviceId) {
-          connectedDevices.splice(j, 1);
+      for (var j = 0; j < cachedDevices.length;) {
+        var cachedDevice = cachedDevices[j];
+        if (cachedDevice.address === deviceId) {
+          cachedDevices.splice(j, 1);
           // The device must have any event handlers removed and be closed before the device will disconnect
-          connectedDevice.device.onconnectionstatuschanged = null;
-          connectedDevice.device.close();
+          cachedDevice.device.onconnectionstatuschanged = null;
+          cachedDevice.device.close();
 
-          connectedDevice.device.deviceInformation.pairing.unpairAsync().done(function (result) {
+          cachedDevice.device.deviceInformation.pairing.unpairAsync().done(function (result) {
             successCallback({ address: deviceId, status: 'disconnected' });
           }, function (error) {
             errorCallback({ error: "disconnect", message: JSON.stringify(error) });
@@ -885,6 +882,13 @@ function watchForDevice(deviceAddress, mustBeConnectable) {
 }
 
 function getDeviceByAddress(deviceAddress) {
+  for (var i = 0; i < cachedDevices.length; i++) {
+    var cachedDevice = cachedDevices[i];
+    if (cachedDevice.address === deviceAddress) {
+      return WinJS.Promise.as(cachedDevice.device);
+    }
+  }
+  
   return WinJS.Promise.wrap(deviceAddress)
     .then(function (deviceAddress) {
       return addressToUint64(deviceAddress);
@@ -893,6 +897,8 @@ function getDeviceByAddress(deviceAddress) {
       return WindowsBluetooth.BluetoothLEDevice.fromBluetoothAddressAsync(deviceAddress);
     }).then(function(device){
       if (device) {
+        // Cache device so we can disconnect from it properly later
+        cachedDevices.push({ address: deviceAddress, device: device });
         return device;
       }
       return findDeviceWithWatcher(deviceAddress);
