@@ -10,6 +10,7 @@ var WATCHER, scanCallback;
 
 var initialized = false;
 var cachedServices = [];
+var cachedDevices = [];
 
 var NAME_KEY = "System.ItemNameDisplay";
 var RSSI_KEY = "System.Devices.Aep.SignalStrength";
@@ -243,13 +244,23 @@ module.exports = {
       };
 
       // Attach listener to device to report disconnected event
-      bleDevice.addEventListener('connectionstatuschanged', function connectionStatusListener(e) {
+      bleDevice.onconnectionstatuschanged = function connectionStatusListener(e) {
         if (e.target.connectionStatus === BluetoothConnectionStatus.disconnected) {
           result.status = "disconnected";
           successCallback(result);
-          bleDevice.removeEventListener('connectionstatuschanged', connectionStatusListener);
+          bleDevice.onconnectionstatuschanged = null;
+          
+          // Remove device from cache
+          for (var i = 0; i < cachedDevices.length;) {
+            var cachedDevice = cachedDevices[i];
+            if (cachedDevice.device.deviceId === bleDevice.deviceId) {
+              cachedDevices.splice(i, 1);
+            } else {
+              i++;
+            }
+          }
         }
-      });
+      };
       // Need to use keepCallback to be able to report "disconnect" event
       // https://github.com/randdusing/cordova-plugin-bluetoothle#connect
       successCallback(result, { keepCallback: true });
@@ -288,6 +299,56 @@ module.exports = {
       });
     }
 
+  },
+  
+  disconnect: function (successCallback, errorCallback, params) {
+    if (!initialized) {
+      errorCallback({ error: "disconnect", message: "Not initialized." });
+      return;
+    }
+
+    var deviceId;
+
+    if (params && params.length > 0 && params[0].address) {
+      deviceId = params[0].address;
+
+      for (var i = 0; i < cachedServices.length;) {
+        var service = cachedServices[i];
+        if (service.deviceId === deviceId) {
+          cachedServices.splice(i, 1);
+          
+          // All characteristics must be unsubscribed from before the device will disconnect
+          var characteristics = service.deviceService.getAllCharacteristics();
+          for (j = 0; j < characteristics.length; j++) {
+            characteristics[j].onvaluechanged = null;
+            characteristics[j].writeClientCharacteristicConfigurationDescriptorAsync(gatt.GattClientCharacteristicConfigurationDescriptorValue.none);
+          }
+          
+          // All service must be closed before the device will disconnect
+          service.deviceService.close();
+        } else {
+          i++;
+        }
+      }
+
+      for (var j = 0; j < cachedDevices.length;) {
+        var cachedDevice = cachedDevices[j];
+        if (cachedDevice.address === deviceId) {
+          cachedDevices.splice(j, 1);
+          // The device must have any event handlers removed and be closed before the device will disconnect
+          cachedDevice.device.onconnectionstatuschanged = null;
+          cachedDevice.device.close();
+
+          cachedDevice.device.deviceInformation.pairing.unpairAsync().done(function (result) {
+            successCallback({ address: deviceId, status: 'disconnected' });
+          }, function (error) {
+            errorCallback({ error: "disconnect", message: JSON.stringify(error) });
+          });
+        } else {
+          j++;
+        }
+      }
+    }
   },
 
   discover: function (successCallback, errorCallback, params) {
@@ -821,6 +882,13 @@ function watchForDevice(deviceAddress, mustBeConnectable) {
 }
 
 function getDeviceByAddress(deviceAddress) {
+  for (var i = 0; i < cachedDevices.length; i++) {
+    var cachedDevice = cachedDevices[i];
+    if (cachedDevice.address === deviceAddress) {
+      return WinJS.Promise.as(cachedDevice.device);
+    }
+  }
+  
   return WinJS.Promise.wrap(deviceAddress)
     .then(function (deviceAddress) {
       return addressToUint64(deviceAddress);
@@ -829,6 +897,8 @@ function getDeviceByAddress(deviceAddress) {
       return WindowsBluetooth.BluetoothLEDevice.fromBluetoothAddressAsync(deviceAddress);
     }).then(function(device){
       if (device) {
+        // Cache device so we can disconnect from it properly later
+        cachedDevices.push({ address: deviceAddress, device: device });
         return device;
       }
       return findDeviceWithWatcher(deviceAddress);
