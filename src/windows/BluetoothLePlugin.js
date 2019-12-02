@@ -83,30 +83,30 @@ module.exports = {
     }
 
     Radios.Radio.getRadiosAsync()
-    .then(function (radios) {
-      // There is a very small chance that there are more than one bluetooth
-      // radio device is available so we'll just pick the first one from the list
-      var radio = radios.filter(function (radio) {
-        return radio.kind === Radios.RadioKind.bluetooth;
-      })[0];
+      .then(function (radios) {
+        // There is a very small chance that there are more than one bluetooth
+        // radio device is available so we'll just pick the first one from the list
+        var radio = radios.filter(function (radio) {
+          return radio.kind === Radios.RadioKind.bluetooth;
+        })[0];
 
-      if (!radio) {
-        throw { error: "initialize", message: "No bluetooth radios available on device" };
-      }
+        if (!radio) {
+          throw { error: "initialize", message: "No bluetooth radios available on device" };
+        }
 
-      if (statusReceiver) {
-        radio.addEventListener('statechanged', reportAdapterState);
-      }
+        if (statusReceiver) {
+          radio.addEventListener('statechanged', reportAdapterState);
+        }
 
-      reportAdapterState({ target: radio });
+        reportAdapterState({ target: radio });
 
-      if (radio.state !== Radios.RadioState.on && request) {
-        // radio.setStateAsync(Windows.Devices.Radios.RadioState.on) doesn't
-        // work somehow so try to invoke settings in an old way.
-        Windows.System.Launcher.launchUriAsync(Windows.Foundation.Uri("ms-settings-bluetooth:"));
-      }
-    })
-    .done(null, errorCallback);
+        if (radio.state !== Radios.RadioState.on && request) {
+          // radio.setStateAsync(Windows.Devices.Radios.RadioState.on) doesn't
+          // work somehow so try to invoke settings in an old way.
+          Windows.System.Launcher.launchUriAsync(Windows.Foundation.Uri("ms-settings-bluetooth:"));
+        }
+      })
+      .done(null, errorCallback);
   },
 
   retrieveConnected: function (successCallback, errorCallback, params) {
@@ -122,7 +122,7 @@ module.exports = {
       for (var i = 0; i < params[0].services.length; i++) {
         var uuid = params[0].services[i];
         if (uuid.length === 4) {
-            uuid = "0000" + uuid + "-0000-1000-8000-00805F9B34FB";
+          uuid = "0000" + uuid + "-0000-1000-8000-00805F9B34FB";
         }
         selector += (i === 0) ? " AND ( " : " OR ";
         selector += "System.DeviceInterface.Bluetooth.ServiceGuid:=\"{" + uuid + "}\"";
@@ -227,46 +227,78 @@ module.exports = {
     }
 
     getDeviceByAddress(address)
-    .then(function(bleDevice){
-      if (bleDevice.connectionStatus === BluetoothConnectionStatus.connected) {
-        return bleDevice;
-      }
-      //if we're not already connected, getting the services will cause a connection to happen
-      return bleDevice.getGattServicesAsync(WindowsBluetooth.BluetoothCacheMode.uncached).then(function(){
-        return bleDevice;
-      });
-    })
-    .done(function (bleDevice) {
-      var result = {
-        name: bleDevice.deviceInformation.name,
-        address: address,
-        status: bleDevice.connectionStatus === BluetoothConnectionStatus.connected ? "connected" : "disconnected"
-      };
-
-      // Attach listener to device to report disconnected event
-      bleDevice.onconnectionstatuschanged = function connectionStatusListener(e) {
-        if (e.target.connectionStatus === BluetoothConnectionStatus.disconnected) {
-          result.status = "disconnected";
-          successCallback(result);
-          bleDevice.onconnectionstatuschanged = null;
-          
-          // Remove device from cache
-          for (var i = 0; i < cachedDevices.length;) {
-            var cachedDevice = cachedDevices[i];
-            if (cachedDevice.device.deviceId === bleDevice.deviceId) {
-              cachedDevices.splice(i, 1);
-            } else {
-              i++;
-            }
-          }
+      .then(function (bleDevice) {
+        if (bleDevice.connectionStatus === BluetoothConnectionStatus.connected) {
+          return bleDevice;
         }
-      };
-      // Need to use keepCallback to be able to report "disconnect" event
-      // https://github.com/randdusing/cordova-plugin-bluetoothle#connect
-      successCallback(result, { keepCallback: true });
-    }, function (err) {
-      errorCallback(err);
-    });
+        //if we're not already connected, getting the services will cause a connection to happen
+        return bleDevice.getGattServicesAsync(WindowsBluetooth.BluetoothCacheMode.uncached).then(function () {
+          return bleDevice;
+        });
+      })
+      .done(function (bleDevice) {
+        var result = {
+          name: bleDevice.deviceInformation.name,
+          address: address,
+          status: bleDevice.connectionStatus === BluetoothConnectionStatus.connected ? "connected" : "disconnected"
+        };
+
+        // Attach listener to device to report disconnected event
+        bleDevice.onconnectionstatuschanged = function connectionStatusListener(e) {
+          if (e.target.connectionStatus === BluetoothConnectionStatus.disconnected) {
+            // After being disconnected, the device can't be reconnected to, without first upairing and rediscovering.
+            // So we just shut the device down entirely here, so that it can be successfully reconnected to again later.
+            console.log(`[connect] BluetoothLePlugin. Detected lost connection.`);
+            result.status = "disconnected";
+            bleDevice.onconnectionstatuschanged = null;
+
+            var deviceId = address;
+            for (var i = 0; i < cachedServices.length;) {
+              var service = cachedServices[i];
+              if (service.deviceId === deviceId) {
+                cachedServices.splice(i, 1);
+
+                // All characteristics must be unsubscribed from before the device will disconnect.
+                var characteristics = service.deviceService.getCharacteristicsAsync();
+                for (j = 0; j < characteristics.length; j++) {
+                  characteristics[j].onvaluechanged = null;
+                  characteristics[j].writeClientCharacteristicConfigurationDescriptorAsync(gatt.GattClientCharacteristicConfigurationDescriptorValue.none);
+                }
+
+                // All service must be closed before the device will disconnect
+                service.deviceService.close();
+
+                for (var j = 0; j < cachedDevices.length;) {
+                  var cachedDevice = cachedDevices[j];
+                  if (cachedDevice.address === deviceId) {
+                    cachedDevices.splice(j, 1);
+                    // The device must have any event handlers removed and be closed before the device will disconnect
+                    cachedDevice.device.onconnectionstatuschanged = null;
+                    cachedDevice.device.close();
+
+                    cachedDevice.device.deviceInformation.pairing.unpairAsync().done(function (result) {
+                      console.log(`[connect] BluetoothLePlugin. cachedDevice unpaired success`);
+                    }, function (error) {
+                      console.log(`[connect] BluetoothLePlugin. cachedDevice failed to unpair`);
+                    });
+                  } else {
+                    j++;
+                  }
+                }
+              } else {
+                i++;
+              }
+            }
+            console.log(`[connect] BluetoothLePlugin. Returning disconnected event.`);
+            successCallback(result);
+          }
+        };
+        // Need to use keepCallback to be able to report "disconnect" event
+        // https://github.com/randdusing/cordova-plugin-bluetoothle#connect
+        successCallback(result, { keepCallback: true });
+      }, function (err) {
+        errorCallback(err);
+      });
   },
 
   close: function (successCallback, errorCallback, params) {
@@ -289,18 +321,18 @@ module.exports = {
           i++;
         }
       }
-      getDeviceByAddress(deviceId).then(function(device){
+      getDeviceByAddress(deviceId).then(function (device) {
         device.close();
         return device.deviceInformation.pairing.unpairAsync();
-      }).done(function(result){
-        successCallback({ address: deviceId, status: 'closed'});
-      }, function(error){
-        errorCallback({ error: "close", message: JSON.stringify(error)});
+      }).done(function (result) {
+        successCallback({ address: deviceId, status: 'closed' });
+      }, function (error) {
+        errorCallback({ error: "close", message: JSON.stringify(error) });
       });
     }
 
   },
-  
+
   disconnect: function (successCallback, errorCallback, params) {
     if (!initialized) {
       errorCallback({ error: "disconnect", message: "Not initialized." });
@@ -316,36 +348,46 @@ module.exports = {
         var service = cachedServices[i];
         if (service.deviceId === deviceId) {
           cachedServices.splice(i, 1);
-          
+
           // All characteristics must be unsubscribed from before the device will disconnect
-          var characteristics = service.deviceService.getAllCharacteristics();
-          for (j = 0; j < characteristics.length; j++) {
-            characteristics[j].onvaluechanged = null;
-            characteristics[j].writeClientCharacteristicConfigurationDescriptorAsync(gatt.GattClientCharacteristicConfigurationDescriptorValue.none);
-          }
-          
-          // All service must be closed before the device will disconnect
-          service.deviceService.close();
-        } else {
-          i++;
-        }
-      }
+          // var characteristics = service.deviceService.getAllCharacteristics();
+          // TODO: The above is deprecated use the following below instead.
+//          await service.deviceService.getCharacteristicsAsync();
 
-      for (var j = 0; j < cachedDevices.length;) {
-        var cachedDevice = cachedDevices[j];
-        if (cachedDevice.address === deviceId) {
-          cachedDevices.splice(j, 1);
-          // The device must have any event handlers removed and be closed before the device will disconnect
-          cachedDevice.device.onconnectionstatuschanged = null;
-          cachedDevice.device.close();
+          service.deviceService.getCharacteristicsAsync().then((characteristics) => {
+            console.log(`[disconnect] Win plugin. getAllCharacteristics success`);
 
-          cachedDevice.device.deviceInformation.pairing.unpairAsync().done(function (result) {
-            successCallback({ address: deviceId, status: 'disconnected' });
-          }, function (error) {
-            errorCallback({ error: "disconnect", message: JSON.stringify(error) });
+            for (j = 0; j < characteristics.length; j++) {
+              characteristics[j].onvaluechanged = null;
+              characteristics[j].writeClientCharacteristicConfigurationDescriptorAsync(gatt.GattClientCharacteristicConfigurationDescriptorValue.none);
+            }
+
+            // All service must be closed before the device will disconnect
+            service.deviceService.close();
+
+            for (var j = 0; j < cachedDevices.length;) {
+              var cachedDevice = cachedDevices[j];
+              if (cachedDevice.address === deviceId) {
+                cachedDevices.splice(j, 1);
+                // The device must have any event handlers removed and be closed before the device will disconnect
+                cachedDevice.device.onconnectionstatuschanged = null;
+                cachedDevice.device.close();
+
+                cachedDevice.device.deviceInformation.pairing.unpairAsync().done(function (result) {
+                  successCallback({ address: deviceId, status: 'disconnected' });
+                }, function (error) {
+                  console.log(`[disconnect] Win plugin. cachedDevice failed to unpair`);
+                  errorCallback({ error: "disconnect", message: JSON.stringify(error) });
+                });
+              } else {
+                j++;
+              }
+            }
+          }, error => {
+
           });
         } else {
-          j++;
+          i++;
         }
       }
     }
@@ -353,13 +395,13 @@ module.exports = {
 
   discover: function (successCallback, errorCallback, params) {
     if (!initialized) {
-      errorCallback({error: "discover", message: "Not initialized."});
+      errorCallback({ error: "discover", message: "Not initialized." });
       return;
     }
 
     var address = params && params[0] && params[0].address;
     if (!address) {
-      errorCallback({error: "connect", message: "Device address is not specified"});
+      errorCallback({ error: "connect", message: "Device address is not specified" });
       return;
     }
 
@@ -376,8 +418,8 @@ module.exports = {
         "address": address,
         "name": device.name
       });
-    }, function(error) {
-      errorCallback({ error: "discover", message: error.message});
+    }, function (error) {
+      errorCallback({ error: "discover", message: error.message });
     });
   },
 
@@ -611,9 +653,9 @@ module.exports = {
       var value = params[0].value;
       var writeOption;
       if (params[0].type !== undefined && params[0].type === "noResponse") {
-          writeOption = gatt.GattWriteOption.writeWithoutResponse;
+        writeOption = gatt.GattWriteOption.writeWithoutResponse;
       } else {
-          writeOption = gatt.GattWriteOption.writeWithResponse;
+        writeOption = gatt.GattWriteOption.writeWithResponse;
       }
 
       getCharacteristic(deviceId, serviceId, characteristicId).then(function (characteristic, deviceName) {
@@ -715,24 +757,24 @@ module.exports = {
     }
 
     getDeviceByAddress(address)
-    .done(function (bleDevice) {
-      if (bleDevice && typeof bleDevice.connectionStatus !== 'undefined') {
-        successCallback({
-          name: bleDevice.name,
-          address: uint64ToAddress(bleDevice.bluetoothAddress),
-          isConnected: bleDevice.connectionStatus === BluetoothConnectionStatus.connected
-        });
-      } else {
-        errorCallback({error: "isConnected", message: "Device not found"});
-      }
-    }, function(error) {
-      errorCallback(error);
-    });
+      .done(function (bleDevice) {
+        if (bleDevice && typeof bleDevice.connectionStatus !== 'undefined') {
+          successCallback({
+            name: bleDevice.name,
+            address: uint64ToAddress(bleDevice.bluetoothAddress),
+            isConnected: bleDevice.connectionStatus === BluetoothConnectionStatus.connected
+          });
+        } else {
+          errorCallback({ error: "isConnected", message: "Device not found" });
+        }
+      }, function (error) {
+        errorCallback(error);
+      });
   },
 
   rssi: function (successCallback, errorCallback, params) {
     if (!initialized) {
-      errorCallback({error: "rssi", message: "Not initialized."});
+      errorCallback({ error: "rssi", message: "Not initialized." });
       return;
     }
 
@@ -743,7 +785,7 @@ module.exports = {
     }
 
     //Ugh. Windows 10 likes to pretend that a device is connected even if it's off. Force it to find the device if it's on.
-    watchForDevice(address, true).done(function(obj) {
+    watchForDevice(address, true).done(function (obj) {
       if (obj && obj.properties && obj.properties.hasKey(RSSI_KEY)) {
         var returnedObj = {
           "status": "rssi",
@@ -756,8 +798,8 @@ module.exports = {
         return;
       }
 
-      errorCallback({error: "rssi", message: "Invalid object returned from watcher: " + JSON.stringify(obj)});
-    }, function(error) {
+      errorCallback({ error: "rssi", message: "Invalid object returned from watcher: " + JSON.stringify(obj) });
+    }, function (error) {
       errorCallback({ error: "rssi", message: error });
     });
   }
@@ -804,14 +846,14 @@ var androidActions = [
   'requestLocation'
 ];
 
-androidActions.forEach(function(key){
+androidActions.forEach(function (key) {
   if (typeof module.exports[key] !== 'undefined') {
     return;
   }
 
-  module.exports[key] = function(successCallback, errorCallback, params) {
+  module.exports[key] = function (successCallback, errorCallback, params) {
     var error = 'Function "' + key + '" is not implemented';
-    errorCallback({error: key, message: error});
+    errorCallback({ error: key, message: error });
   };
 });
 
@@ -843,9 +885,9 @@ function createWatcherForAddress(deviceAddress, requireConnectable) {
 }
 
 function findDeviceWithWatcher(deviceAddress) {
-  return watchForDevice(deviceAddress).then(function(){
+  return watchForDevice(deviceAddress).then(function () {
     return WindowsBluetooth.BluetoothLEDevice.fromBluetoothAddressAsync(deviceAddress);
-  }).then(function(device){
+  }).then(function (device) {
     if (!device) {
       throw new Error('Unable to find device "' + deviceAddress + '"');
     }
@@ -867,11 +909,11 @@ function watchForDevice(deviceAddress, mustBeConnectable) {
         resolve(obj);
       }
     }
-    ["added", "updated"].forEach(function(eventName) {
+    ["added", "updated"].forEach(function (eventName) {
       watcher.addEventListener(eventName, watcherCallback, false);
     });
 
-    watcher.addEventListener("enumerationcompleted", function(){
+    watcher.addEventListener("enumerationcompleted", function () {
       if (!wasFound) {
         watcher.stop();
         reject('Unable to find device');
@@ -888,14 +930,14 @@ function getDeviceByAddress(deviceAddress) {
       return WinJS.Promise.as(cachedDevice.device);
     }
   }
-  
+
   return WinJS.Promise.wrap(deviceAddress)
     .then(function (deviceAddress) {
       return addressToUint64(deviceAddress);
     })
     .then(function (deviceAddress) {
       return WindowsBluetooth.BluetoothLEDevice.fromBluetoothAddressAsync(deviceAddress);
-    }).then(function(device){
+    }).then(function (device) {
       if (device) {
         // Cache device so we can disconnect from it properly later
         cachedDevices.push({ address: deviceAddress, device: device });
@@ -933,7 +975,7 @@ function getService(deviceId, serviceId) {
       throw new Error("Device or service not found.");
     }).then(function (deviceService) {
       if (deviceService) {
-        cachedServices.push({deviceId: deviceId, serviceId: serviceId, deviceService: deviceService});
+        cachedServices.push({ deviceId: deviceId, serviceId: serviceId, deviceService: deviceService });
         return deviceService;
       }
 
@@ -947,12 +989,12 @@ function getCharacteristic(deviceId, serviceId, characteristicId) {
       characteristicId = BluetoothUuidHelper.fromShortId(parseInt("0x" + characteristicId, 16));
     }
     return service.getCharacteristicsForUuidAsync(characteristicId);
-  }).then(function(characteristicsResult) {
+  }).then(function (characteristicsResult) {
     if (!characteristicsResult.characteristics) {
       throw new Error("Characteristic not found.");
     }
     return characteristicsResult.characteristics;
-  }).then(function(characteristics) {
+  }).then(function (characteristics) {
     if (characteristics.length > 0) {
       return characteristics[0];
     }
@@ -966,12 +1008,12 @@ function getDescriptor(deviceId, serviceId, characteristicId, descriptorId) {
       descriptorId = BluetoothUuidHelper.fromShortId(parseInt("0x" + descriptorId, 16));
     }
     return characteristic.getDescriptorsForUuidAsync(descriptorId);
-  }).then(function(descriptorsResult) {
+  }).then(function (descriptorsResult) {
     if (!descriptorsResult.descriptors) {
       throw new Error("Descriptor not found.");
     }
     return descriptorsResult.descriptors;
-  }).then(function(descriptors){
+  }).then(function (descriptors) {
     if (descriptors.length > 0) {
       return descriptors[0];
     }
@@ -1088,302 +1130,302 @@ function getUUID(service) {
 
 function getServiceInfos() {
   return [
-   {
-     uuid: 0x1811,
-     characteristics: [
-       { uuid: 0x2A47, descriptors: [] },
-       { uuid: 0x2A46, descriptors: [0x2902, ] },
-       { uuid: 0x2A48, descriptors: [] },
-       { uuid: 0x2A45, descriptors: [0x2902, ] },
-       { uuid: 0x2A44, descriptors: [] },
-     ]
-   },
-  {
-    uuid: 0x180F,
-    characteristics: [
-      { uuid: 0x2A19, descriptors: [0x2904, 0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x1810,
-    characteristics: [
-      { uuid: 0x2A35, descriptors: [0x2902, ] },
-      { uuid: 0x2A36, descriptors: [0x2902, ] },
-      { uuid: 0x2A49, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x181B,
-    characteristics: [
-      { uuid: 0x2A9B, descriptors: [] },
-      { uuid: 0x2A9C, descriptors: [0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x181E,
-    characteristics: [
-      { uuid: 0x2AA4, descriptors: [] },
-      { uuid: 0x2AA5, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x181F,
-    characteristics: [
-      { uuid: 0x2AA7, descriptors: [0x2902, ] },
-      { uuid: 0x2AA8, descriptors: [] },
-      { uuid: 0x2AA9, descriptors: [] },
-      { uuid: 0x2AAA, descriptors: [] },
-      { uuid: 0x2AAB, descriptors: [] },
-      { uuid: 0x2A52, descriptors: [0x2902, ] },
-      { uuid: 0x2AAC, descriptors: [0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x1805,
-    characteristics: [
-      { uuid: 0x2A2B, descriptors: [0x2902, ] },
-      { uuid: 0x2A0F, descriptors: [] },
-      { uuid: 0x2A14, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1818,
-    characteristics: [
-      { uuid: 0x2A63, descriptors: [0x2902, 0x2903, ] },
-      { uuid: 0x2A65, descriptors: [] },
-      { uuid: 0x2A5D, descriptors: [] },
-      { uuid: 0x2A64, descriptors: [0x2902, ] },
-      { uuid: 0x2A66, descriptors: [0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x1816,
-    characteristics: [
-      { uuid: 0x2A5B, descriptors: [0x2902, ] },
-      { uuid: 0x2A5C, descriptors: [] },
-      { uuid: 0x2A5D, descriptors: [] },
-      { uuid: 0x2A55, descriptors: [0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x180A,
-    characteristics: [
-      { uuid: 0x2A29, descriptors: [] },
-      { uuid: 0x2A24, descriptors: [] },
-      { uuid: 0x2A25, descriptors: [] },
-      { uuid: 0x2A27, descriptors: [] },
-      { uuid: 0x2A26, descriptors: [] },
-      { uuid: 0x2A28, descriptors: [] },
-      { uuid: 0x2A23, descriptors: [] },
-      { uuid: 0x2A50, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x181A,
-    characteristics: [
-      { uuid: 0x2A7D, descriptors: [] },
-      { uuid: 0x2A73, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A72, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A7B, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A6C, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A74, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A7A, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A6F, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A77, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A75, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A78, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A6D, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A6E, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A71, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A70, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A76, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A79, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2AA3, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2A2C, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2AA0, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-      { uuid: 0x2AA1, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906, ] },
-    ]
-  },
-  {
-    uuid: 0x1800,
-    characteristics: [
-      { uuid: 0x2A00, descriptors: [] },
-      { uuid: 0x2A01, descriptors: [] },
-      { uuid: 0x2A02, descriptors: [] },
-      { uuid: 0x2A03, descriptors: [] },
-      { uuid: 0x2A04, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1801,
-    characteristics: [
-      { uuid: 0x2A05, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1808,
-    characteristics: [
-      { uuid: 0x2A18, descriptors: [0x2902, ] },
-      { uuid: 0x2A34, descriptors: [0x2902, ] },
-      { uuid: 0x2A51, descriptors: [] },
-      { uuid: 0x2A52, descriptors: [0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x1809,
-    characteristics: [
-      { uuid: 0x2A1C, descriptors: [0x2902, ] },
-      { uuid: 0x2A1D, descriptors: [] },
-      { uuid: 0x2A1E, descriptors: [0x2902, ] },
-      { uuid: 0x2A21, descriptors: [0x2902, 0x2906, ] },
-    ]
-  },
-  {
-    uuid: 0x180D,
-    characteristics: [
-      { uuid: 0x2A37, descriptors: [0x2902, ] },
-      { uuid: 0x2A38, descriptors: [] },
-      { uuid: 0x2A39, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1812,
-    characteristics: [
-      { uuid: 0x2A4E, descriptors: [] },
-      { uuid: 0x2A4D, descriptors: [0x2902, 0x2908, ] },
-      { uuid: 0x2A4B, descriptors: [0x2907, ] },
-      { uuid: 0x2A22, descriptors: [0x2902, ] },
-      { uuid: 0x2A32, descriptors: [] },
-      { uuid: 0x2A33, descriptors: [0x2902, ] },
-      { uuid: 0x2A4A, descriptors: [] },
-      { uuid: 0x2A4C, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1802,
-    characteristics: [
-      { uuid: 0x2A06, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1820,
-    characteristics: [
-    ]
-  },
-  {
-    uuid: 0x1803,
-    characteristics: [
-      { uuid: 0x2A06, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1819,
-    characteristics: [
-      { uuid: 0x2A6A, descriptors: [] },
-      { uuid: 0x2A67, descriptors: [0x2902, ] },
-      { uuid: 0x2A69, descriptors: [] },
-      { uuid: 0x2A6B, descriptors: [0x2902, ] },
-      { uuid: 0x2A68, descriptors: [0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x1807,
-    characteristics: [
-      { uuid: 0x2A11, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x180E,
-    characteristics: [
-      { uuid: 0x2A3F, descriptors: [0x2902, ] },
-      { uuid: 0x2A41, descriptors: [0x2902, ] },
-      { uuid: 0x2A40, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1806,
-    characteristics: [
-      { uuid: 0x2A16, descriptors: [] },
-      { uuid: 0x2A17, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x1814,
-    characteristics: [
-      { uuid: 0x2A53, descriptors: [0x2902, ] },
-      { uuid: 0x2A54, descriptors: [] },
-      { uuid: 0x2A5D, descriptors: [] },
-      { uuid: 0x2A55, descriptors: [0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x1813,
-    characteristics: [
-      { uuid: 0x2A4F, descriptors: [] },
-      { uuid: 0x2A31, descriptors: [0x2902, ] },
-    ]
-  },
-  {
-    uuid: 0x1804,
-    characteristics: [
-      { uuid: 0x2A07, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x181C,
-    characteristics: [
-      { uuid: 0x2A8A, descriptors: [] },
-      { uuid: 0x2A90, descriptors: [] },
-      { uuid: 0x2A87, descriptors: [] },
-      { uuid: 0x2A80, descriptors: [] },
-      { uuid: 0x2A85, descriptors: [] },
-      { uuid: 0x2A8C, descriptors: [] },
-      { uuid: 0x2A98, descriptors: [] },
-      { uuid: 0x2A8E, descriptors: [] },
-      { uuid: 0x2A96, descriptors: [] },
-      { uuid: 0x2A8D, descriptors: [] },
-      { uuid: 0x2A92, descriptors: [] },
-      { uuid: 0x2A91, descriptors: [] },
-      { uuid: 0x2A7F, descriptors: [] },
-      { uuid: 0x2A83, descriptors: [] },
-      { uuid: 0x2A93, descriptors: [] },
-      { uuid: 0x2A86, descriptors: [] },
-      { uuid: 0x2A97, descriptors: [] },
-      { uuid: 0x2A8F, descriptors: [] },
-      { uuid: 0x2A88, descriptors: [] },
-      { uuid: 0x2A89, descriptors: [] },
-      { uuid: 0x2A7E, descriptors: [] },
-      { uuid: 0x2A84, descriptors: [] },
-      { uuid: 0x2A81, descriptors: [] },
-      { uuid: 0x2A82, descriptors: [] },
-      { uuid: 0x2A8B, descriptors: [] },
-      { uuid: 0x2A94, descriptors: [] },
-      { uuid: 0x2A95, descriptors: [] },
-      { uuid: 0x2A99, descriptors: [0x2902, ] },
-      { uuid: 0x2A9A, descriptors: [] },
-      { uuid: 0x2A9F, descriptors: [0x2902, ] },
-      { uuid: 0x2AA2, descriptors: [] },
-    ]
-  },
-  {
-    uuid: 0x181D,
-    characteristics: [
-      { uuid: 0x2A9E, descriptors: [] },
-      { uuid: 0x2A9D, descriptors: [0x2902, ] },
-    ]
-  },
-  // Medisana BS 430 Connect (Body Analysis Scale)
-  {
-    uuid: 0x78b2,
-    characteristics: [
-      { uuid: 0x8a20, descriptors: [] },
-      { uuid: 0x8a21, descriptors: [0x2902, ] },
-      { uuid: 0x8a22, descriptors: [0x2902, ] },
-      { uuid: 0x8a81, descriptors: [] },
-      { uuid: 0x8a82, descriptors: [0x2902, ] },
-    ]
-  }
-  // ---------------------------------------------
+    {
+      uuid: 0x1811,
+      characteristics: [
+        { uuid: 0x2A47, descriptors: [] },
+        { uuid: 0x2A46, descriptors: [0x2902,] },
+        { uuid: 0x2A48, descriptors: [] },
+        { uuid: 0x2A45, descriptors: [0x2902,] },
+        { uuid: 0x2A44, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x180F,
+      characteristics: [
+        { uuid: 0x2A19, descriptors: [0x2904, 0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x1810,
+      characteristics: [
+        { uuid: 0x2A35, descriptors: [0x2902,] },
+        { uuid: 0x2A36, descriptors: [0x2902,] },
+        { uuid: 0x2A49, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x181B,
+      characteristics: [
+        { uuid: 0x2A9B, descriptors: [] },
+        { uuid: 0x2A9C, descriptors: [0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x181E,
+      characteristics: [
+        { uuid: 0x2AA4, descriptors: [] },
+        { uuid: 0x2AA5, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x181F,
+      characteristics: [
+        { uuid: 0x2AA7, descriptors: [0x2902,] },
+        { uuid: 0x2AA8, descriptors: [] },
+        { uuid: 0x2AA9, descriptors: [] },
+        { uuid: 0x2AAA, descriptors: [] },
+        { uuid: 0x2AAB, descriptors: [] },
+        { uuid: 0x2A52, descriptors: [0x2902,] },
+        { uuid: 0x2AAC, descriptors: [0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x1805,
+      characteristics: [
+        { uuid: 0x2A2B, descriptors: [0x2902,] },
+        { uuid: 0x2A0F, descriptors: [] },
+        { uuid: 0x2A14, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1818,
+      characteristics: [
+        { uuid: 0x2A63, descriptors: [0x2902, 0x2903,] },
+        { uuid: 0x2A65, descriptors: [] },
+        { uuid: 0x2A5D, descriptors: [] },
+        { uuid: 0x2A64, descriptors: [0x2902,] },
+        { uuid: 0x2A66, descriptors: [0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x1816,
+      characteristics: [
+        { uuid: 0x2A5B, descriptors: [0x2902,] },
+        { uuid: 0x2A5C, descriptors: [] },
+        { uuid: 0x2A5D, descriptors: [] },
+        { uuid: 0x2A55, descriptors: [0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x180A,
+      characteristics: [
+        { uuid: 0x2A29, descriptors: [] },
+        { uuid: 0x2A24, descriptors: [] },
+        { uuid: 0x2A25, descriptors: [] },
+        { uuid: 0x2A27, descriptors: [] },
+        { uuid: 0x2A26, descriptors: [] },
+        { uuid: 0x2A28, descriptors: [] },
+        { uuid: 0x2A23, descriptors: [] },
+        { uuid: 0x2A50, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x181A,
+      characteristics: [
+        { uuid: 0x2A7D, descriptors: [] },
+        { uuid: 0x2A73, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A72, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A7B, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A6C, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A74, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A7A, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A6F, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A77, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A75, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A78, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A6D, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A6E, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A71, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A70, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A76, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A79, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2AA3, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2A2C, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2AA0, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+        { uuid: 0x2AA1, descriptors: [0x290C, 0x290D, 0x290B, 0x2901, 0x2906,] },
+      ]
+    },
+    {
+      uuid: 0x1800,
+      characteristics: [
+        { uuid: 0x2A00, descriptors: [] },
+        { uuid: 0x2A01, descriptors: [] },
+        { uuid: 0x2A02, descriptors: [] },
+        { uuid: 0x2A03, descriptors: [] },
+        { uuid: 0x2A04, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1801,
+      characteristics: [
+        { uuid: 0x2A05, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1808,
+      characteristics: [
+        { uuid: 0x2A18, descriptors: [0x2902,] },
+        { uuid: 0x2A34, descriptors: [0x2902,] },
+        { uuid: 0x2A51, descriptors: [] },
+        { uuid: 0x2A52, descriptors: [0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x1809,
+      characteristics: [
+        { uuid: 0x2A1C, descriptors: [0x2902,] },
+        { uuid: 0x2A1D, descriptors: [] },
+        { uuid: 0x2A1E, descriptors: [0x2902,] },
+        { uuid: 0x2A21, descriptors: [0x2902, 0x2906,] },
+      ]
+    },
+    {
+      uuid: 0x180D,
+      characteristics: [
+        { uuid: 0x2A37, descriptors: [0x2902,] },
+        { uuid: 0x2A38, descriptors: [] },
+        { uuid: 0x2A39, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1812,
+      characteristics: [
+        { uuid: 0x2A4E, descriptors: [] },
+        { uuid: 0x2A4D, descriptors: [0x2902, 0x2908,] },
+        { uuid: 0x2A4B, descriptors: [0x2907,] },
+        { uuid: 0x2A22, descriptors: [0x2902,] },
+        { uuid: 0x2A32, descriptors: [] },
+        { uuid: 0x2A33, descriptors: [0x2902,] },
+        { uuid: 0x2A4A, descriptors: [] },
+        { uuid: 0x2A4C, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1802,
+      characteristics: [
+        { uuid: 0x2A06, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1820,
+      characteristics: [
+      ]
+    },
+    {
+      uuid: 0x1803,
+      characteristics: [
+        { uuid: 0x2A06, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1819,
+      characteristics: [
+        { uuid: 0x2A6A, descriptors: [] },
+        { uuid: 0x2A67, descriptors: [0x2902,] },
+        { uuid: 0x2A69, descriptors: [] },
+        { uuid: 0x2A6B, descriptors: [0x2902,] },
+        { uuid: 0x2A68, descriptors: [0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x1807,
+      characteristics: [
+        { uuid: 0x2A11, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x180E,
+      characteristics: [
+        { uuid: 0x2A3F, descriptors: [0x2902,] },
+        { uuid: 0x2A41, descriptors: [0x2902,] },
+        { uuid: 0x2A40, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1806,
+      characteristics: [
+        { uuid: 0x2A16, descriptors: [] },
+        { uuid: 0x2A17, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x1814,
+      characteristics: [
+        { uuid: 0x2A53, descriptors: [0x2902,] },
+        { uuid: 0x2A54, descriptors: [] },
+        { uuid: 0x2A5D, descriptors: [] },
+        { uuid: 0x2A55, descriptors: [0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x1813,
+      characteristics: [
+        { uuid: 0x2A4F, descriptors: [] },
+        { uuid: 0x2A31, descriptors: [0x2902,] },
+      ]
+    },
+    {
+      uuid: 0x1804,
+      characteristics: [
+        { uuid: 0x2A07, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x181C,
+      characteristics: [
+        { uuid: 0x2A8A, descriptors: [] },
+        { uuid: 0x2A90, descriptors: [] },
+        { uuid: 0x2A87, descriptors: [] },
+        { uuid: 0x2A80, descriptors: [] },
+        { uuid: 0x2A85, descriptors: [] },
+        { uuid: 0x2A8C, descriptors: [] },
+        { uuid: 0x2A98, descriptors: [] },
+        { uuid: 0x2A8E, descriptors: [] },
+        { uuid: 0x2A96, descriptors: [] },
+        { uuid: 0x2A8D, descriptors: [] },
+        { uuid: 0x2A92, descriptors: [] },
+        { uuid: 0x2A91, descriptors: [] },
+        { uuid: 0x2A7F, descriptors: [] },
+        { uuid: 0x2A83, descriptors: [] },
+        { uuid: 0x2A93, descriptors: [] },
+        { uuid: 0x2A86, descriptors: [] },
+        { uuid: 0x2A97, descriptors: [] },
+        { uuid: 0x2A8F, descriptors: [] },
+        { uuid: 0x2A88, descriptors: [] },
+        { uuid: 0x2A89, descriptors: [] },
+        { uuid: 0x2A7E, descriptors: [] },
+        { uuid: 0x2A84, descriptors: [] },
+        { uuid: 0x2A81, descriptors: [] },
+        { uuid: 0x2A82, descriptors: [] },
+        { uuid: 0x2A8B, descriptors: [] },
+        { uuid: 0x2A94, descriptors: [] },
+        { uuid: 0x2A95, descriptors: [] },
+        { uuid: 0x2A99, descriptors: [0x2902,] },
+        { uuid: 0x2A9A, descriptors: [] },
+        { uuid: 0x2A9F, descriptors: [0x2902,] },
+        { uuid: 0x2AA2, descriptors: [] },
+      ]
+    },
+    {
+      uuid: 0x181D,
+      characteristics: [
+        { uuid: 0x2A9E, descriptors: [] },
+        { uuid: 0x2A9D, descriptors: [0x2902,] },
+      ]
+    },
+    // Medisana BS 430 Connect (Body Analysis Scale)
+    {
+      uuid: 0x78b2,
+      characteristics: [
+        { uuid: 0x8a20, descriptors: [] },
+        { uuid: 0x8a21, descriptors: [0x2902,] },
+        { uuid: 0x8a22, descriptors: [0x2902,] },
+        { uuid: 0x8a81, descriptors: [] },
+        { uuid: 0x8a82, descriptors: [0x2902,] },
+      ]
+    }
+    // ---------------------------------------------
   ];
 }
 
