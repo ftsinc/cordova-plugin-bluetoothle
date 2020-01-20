@@ -248,7 +248,7 @@ module.exports = {
           if (e.target.connectionStatus === BluetoothConnectionStatus.disconnected) {
             // After being disconnected, the device can't be reconnected to, without first upairing and rediscovering.
             // So we just shut the device down entirely here, so that it can be successfully reconnected to again later.
-            console.log(`[connect] BluetoothLePlugin. Detected lost connection.`);
+            console.log(`[connect] Win BluetoothLePlugin. Detected lost connection.`);
             result.status = "disconnected";
             bleDevice.onconnectionstatuschanged = null;
 
@@ -260,7 +260,7 @@ module.exports = {
 
                 // All characteristics must be unsubscribed from before the device will disconnect.
                 var characteristics = service.deviceService.getCharacteristicsAsync();
-                for (j = 0; j < characteristics.length; j++) {
+                for (var j = 0; j < characteristics.length; j++) {
                   characteristics[j].onvaluechanged = null;
                   characteristics[j].writeClientCharacteristicConfigurationDescriptorAsync(gatt.GattClientCharacteristicConfigurationDescriptorValue.none);
                 }
@@ -268,10 +268,10 @@ module.exports = {
                 // All service must be closed before the device will disconnect
                 service.deviceService.close();
 
-                for (var j = 0; j < cachedDevices.length;) {
-                  var cachedDevice = cachedDevices[j];
+                for (var k = 0; k < cachedDevices.length;) {
+                  var cachedDevice = cachedDevices[k];
                   if (cachedDevice.address === deviceId) {
-                    cachedDevices.splice(j, 1);
+                    cachedDevices.splice(k, 1);
                     // The device must have any event handlers removed and be closed before the device will disconnect
                     cachedDevice.device.onconnectionstatuschanged = null;
                     cachedDevice.device.close();
@@ -282,7 +282,7 @@ module.exports = {
                       console.log(`[connect] BluetoothLePlugin. cachedDevice failed to unpair`);
                     });
                   } else {
-                    j++;
+                    k++;
                   }
                 }
               } else {
@@ -350,29 +350,27 @@ module.exports = {
           cachedServices.splice(i, 1);
 
           // All characteristics must be unsubscribed from before the device will disconnect
-          // var characteristics = service.deviceService.getAllCharacteristics();
-          // TODO: The above is deprecated use the following below instead.
-//          await service.deviceService.getCharacteristicsAsync();
+          service.deviceService.getCharacteristicsAsync().then((result) => {
+            console.log(`[disconnect] Win plugin. getCharacteristicsAsync success.`);
 
-          service.deviceService.getCharacteristicsAsync().then((characteristics) => {
-            console.log(`[disconnect] Win plugin. getAllCharacteristics success`);
-
-            for (j = 0; j < characteristics.length; j++) {
-              characteristics[j].onvaluechanged = null;
-              characteristics[j].writeClientCharacteristicConfigurationDescriptorAsync(gatt.GattClientCharacteristicConfigurationDescriptorValue.none);
+            if (result) {
+              console.log(`[disconnect] Win plugin. removing ${result.characteristics.length} characteristics.`);
+              for (var j = 0; j < result.characteristics.length; j++) {
+                result.characteristics[j].onvaluechanged = null;
+                result.characteristics[j].writeClientCharacteristicConfigurationDescriptorAsync(gatt.GattClientCharacteristicConfigurationDescriptorValue.none);
+              }
             }
 
             // All service must be closed before the device will disconnect
             service.deviceService.close();
 
-            for (var j = 0; j < cachedDevices.length;) {
-              var cachedDevice = cachedDevices[j];
+            for (var k = 0; k < cachedDevices.length;) {
+              var cachedDevice = cachedDevices[k];
               if (cachedDevice.address === deviceId) {
-                cachedDevices.splice(j, 1);
+                cachedDevices.splice(k, 1);
                 // The device must have any event handlers removed and be closed before the device will disconnect
                 cachedDevice.device.onconnectionstatuschanged = null;
                 cachedDevice.device.close();
-
                 cachedDevice.device.deviceInformation.pairing.unpairAsync().done(function (result) {
                   successCallback({ address: deviceId, status: 'disconnected' });
                 }, function (error) {
@@ -380,11 +378,11 @@ module.exports = {
                   errorCallback({ error: "disconnect", message: JSON.stringify(error) });
                 });
               } else {
-                j++;
+                k++;
               }
             }
           }, error => {
-
+            console.log(`[disconnect] Win plugin disconnection error getting characteristics. error: ${JSON.stringify(error)}`);
           });
         } else {
           i++;
